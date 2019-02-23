@@ -47,6 +47,19 @@ function symmetricEqualExcept(iobj, jobj, field, cache) {
     }
 }
 
+function extract(obj, fields) {
+    return fields.map((k) => {
+        const v = obj[k];
+        delete obj[k];
+
+        return v;
+    });
+}
+
+function toRelation(t) {
+    return t instanceof AlgebraNode ? t : new Relation(t);
+}
+
 class AlgebraNode {
 
     project(...columns) {
@@ -66,57 +79,62 @@ class AlgebraNode {
     }
 
     join(other, links) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
-        }
-
-        return new Join(this, other, links);
+        return new Join(this, toRelation(other), links);
     }
 
     theta(other, rels) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
-        }
-
-        return new Theta(this, other, rels);
+        return new Theta(this, toRelation(other), rels);
     }
 
     semijoin(other, rels) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
-        }
-
-        return new SemiJoin(this, other, rels);
+        return new SemiJoin(this, toRelation(other), rels);
     }
 
     antijoin(other, rels) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
-        }
-
-        return new AntiJoin(this, other, rels);
+        return new AntiJoin(this, toRelation(other), rels);
     }
 
     divide(other, scol, ocol = scol) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
-        }
-
-        return new Division(this, other, scol, ocol);
+        return new Division(this, toRelation(other), scol, ocol);
     }
     
     union(other) {
-        if (!(other instanceof AlgebraNode)) {
-            other = new Relation(other);
+        return new Union(this, toRelation(other));
+    }
+
+    unique() {
+        return new Unique(this);
+    }
+
+    get rows() {
+        if (this._rows === null) this._calcrows();
+
+        return this._rows;
+    }
+
+    get relation() {
+        if (!this._table) {
+            this._table = new Relation(this.rows);
         }
 
-        return new Union(this, other);
+        return this._table;
+    }
+
+    get resolved() {
+        return this._rows instanceof Array;
     }
 } 
 
 class Projection extends AlgebraNode {
     constructor(node, columns) {
-        this.rows = node.rows.map((row) => {
+        this.node = node;
+        this.columns = columns;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ node, columns ] = extract(this, [ 'node', 'columns' ]);
+        this._rows = node.rows.map((row) => {
             const nr = {};
             for (const c of columns) {
                 nr[c] = row[c];
@@ -129,8 +147,14 @@ class Projection extends AlgebraNode {
 
 class AntiProjection extends AlgebraNode {
     constructor(node, columns) {
-        columns = new Set(columns);
-        this.rows = node.rows.map((row) => {
+        this.node = node;
+        this.columns = new Set(columns);
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ node, columns ] = extract(this, [ 'node', 'columns' ]);
+        this._rows = node.rows.map((row) => {
             const nr = {};
             for (const c of Object.keys(row)) {
                 if (columns.has(c)) continue;
@@ -144,7 +168,14 @@ class AntiProjection extends AlgebraNode {
 
 class Rename extends AlgebraNode {
     constructor(node, changes) {
-        this.rows = node.rows.map((row) => {
+        this.node = node;
+        this.changes = changes;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ node, changes ] = extract(this, [ 'node', 'changes' ]);
+        this._rows = node.rows.map((row) => {
             const nr = {};
             for (const k of Object.keys(row)) {
                 const ckey = changes[k];
@@ -159,7 +190,14 @@ class Rename extends AlgebraNode {
 
 class Select extends AlgebraNode {
     constructor(node, criteria) {
-        this.rows = node.rows.filter((row) =>
+        this.node = node;
+        this.criteria = criteria;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ node, criteria ] = extract(this, [ 'node', 'criteria' ]);
+        this._rows = node.rows.filter((row) =>
             criteria.every((crit) => 
                 (crit.hasOwnProperty('value') && row[crit.col] === crit.value) ||
                 (typeof crit.predicate !== 'function' || crit.predicate(row[crit.col]))
@@ -169,7 +207,17 @@ class Select extends AlgebraNode {
 }
 
 class Join extends AlgebraNode {
-    constructor({ rows: self }, { rows: other }, links) {
+    constructor(snode, onode, links) {
+        this.snode = snode;
+        this.onode = onode;
+        this.links = links;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ { rows: self }, { rows: other }, links ] =
+            extract(this, [ 'snode', 'onode', 'links' ]);
+
         const sjcols = new Set();
         const ojcols = new Set();
         for (const { self, other } of links) {
@@ -207,14 +255,23 @@ class Join extends AlgebraNode {
             }
         }
 
-        this.rows = nrows;
+        this._rows = nrows;
     }
 }
 
 class Theta extends AlgebraNode {
-    constructor({ rows: self }, { rows: other }, rels) {
-        const nrows = [];
+    constructor(snode, onode, rels) {
+        this.snode = snode;
+        this.onode = onode;
+        this.rels = rels;
+        this._rows = null;
+    }
 
+    _calcrows() {
+        const [ { rows: self }, { rows: other }, rels ] =
+            extract(this, [ 'snode', 'onode', 'rels' ]);
+
+        const nrows = [];
         for (const srow of self) {
             for (const orow of other) {
                 const match = rels.every(({ self, other, predicate }) =>
@@ -224,24 +281,56 @@ class Theta extends AlgebraNode {
             }
         }
 
-        this.rows = nrows;
+        this._rows = nrows;
     }
 }
 
 class SemiJoin extends AlgebraNode {
-    constructor({ rows: self }, { rows: other }, rels) {
-        this.rows = self.filter((srow) => semijoinMatchExists(srow, other, rels));
+    constructor(snode, onode, rels) {
+        this.snode = snode;
+        this.onode = onode;
+        this.rels = rels;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ { rows: self }, { rows: other }, rels ] =
+            extract(this, [ 'snode', 'onode', 'rels' ]);
+        
+        this._rows = self.filter((srow) => semijoinMatchExists(srow, other, rels));
     }
 }
 
 class AntiJoin extends AlgebraNode {
-    constructor({ rows: self }, { rows: other }, rels) {
-        this.rows = self.filter((srow) => !semijoinMatchExists(srow, other, rels));
+    constructor(snode, onode, rels) {
+        this.snode = snode;
+        this.onode = onode;
+        this.rels = rels;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ { rows: self }, { rows: other }, rels ] =
+            extract(this, [ 'snode', 'onode', 'rels' ]);
+        
+        this._rows = self.filter((srow) => !semijoinMatchExists(srow, other, rels));
     }
 }
 
 class Division extends AlgebraNode {
-    constructor({ rows: self }, { rows: other }, scol, ocol) {
+    
+    constructor(snode, onode, scol, ocol) {
+        this.snode = snode;
+        this.onode = onode;
+        this.scol = scol;
+        this.ocol = ocol;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ { rows: self }, { rows: other }, scol, ocol ] =
+            extract(this, [ 'snode', 'onode', 'scol', 'ocol' ]);
+
         const values = new Set(other.map((orow) => orow[ocol]));
         const l = self.length;
         const used = new Set();
@@ -267,13 +356,43 @@ class Division extends AlgebraNode {
             }
         }
 
-        this.rows = nrows;
+        this._rows = nrows;
     }
 }
 
 class Union extends AlgebraNode {
-    constructor(self, other) {
-        this.rows = [ ...self.rows, ...other.rows ];
+    constructor(snode, onode) {
+        this.snode = snode;
+        this.onode = onode;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const [ { rows: self }, { rows: other } ] = extract(this, [ 'snode', 'onode' ]);
+        this._rows = [ ...self, ...other ];
+    }
+}
+
+class Unique extends AlgebraNode {
+    constructor(node) {
+        this.node = node;
+        this._rows = null;
+    }
+
+    _calcrows() {
+        const nrows = [];
+        const { rows } = this.node;
+        const l = rows.length;
+        this.node = null;
+
+        for (let i = 0; i < l; i++) {
+            const row = rows[i];
+            if (!nrows.some((r) => symmetricEqual(r, row))){
+                nrows.push(row);
+            }
+        }
+        
+        this._rows = nrows;
     }
 }
 
@@ -283,7 +402,11 @@ export class Relation extends AlgebraNode {
             return rows[0];
         }
 
-        this.rows = rows.flat();
+        this._rows = rows.flat();
+    }
+
+    get relation() {
+        return this;
     }
 
     static project(table, columns) {
@@ -324,5 +447,9 @@ export class Relation extends AlgebraNode {
 
     static union(self, other) {
         return new Union(new Relation(self), new Relation(other));
+    }
+
+    static unique(table) {
+        return new Unique(new Relation(table));
     }
 }
